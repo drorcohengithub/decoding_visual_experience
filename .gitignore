@@ -1,0 +1,4 @@
+*.ipynb_checkpoints*
+*init*
+**/*.ipynb_checkpoints/
+**/pre_12062020/*
