@@ -2,3 +2,5 @@
 *init*
 **/*.ipynb_checkpoints/
 **/pre_12062020/*
+*.png
+Reproduce_nishimoto_recon.py
