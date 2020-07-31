@@ -1,55 +1,63 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In this notebook we reproduce the seminal work "Reconstructing Visual Experiences from Brain Activity Evoked by Natural Movies" (Nishimoto et al, 2011, Current Biology. The code here covers the basics of encoding-decoding studies and may serve as an introductory tutorial if you are thinking of taking your work in this direction. 
+# # Background
+# 
+# In this notebook we reproduce the seminal work of **Reconstructing Visual Experiences from Brain Activity Evoked by Natural Movies** (Nishimoto et al, 2011, Current Biology). The code here covers the basics of encoding-decoding and will be useful as an introductory tutorial if you are taking your work in this direction. 
 
-# ## Background
+# The objective here is to try and see if we can predict what is going on in peoples' brain just by looking at their brain activity. This is often referred to as "decoding". To do this we need to develop a method that takes as input the brain activity and produces as an output some description of what was going in their head. In the papers the output was movie frames. 
 # 
-# The object here is to try and see if we can predict what is going on in peoples' brain just by looking at their brain activity. This is often referred to as "decoding". To do this we need to develop a method that takes as input the brain activity and produces as an output some description of what was going in their head. In the papers the output was movie frames. 
-# 
-# The experiment we will be analyzing is very simple. Subjects viewed a movie (the stimulus) inside an fMRI scanner. Our method will use this data to build a model that takes in some brain data and predict which part of the stimulus (which frame in the movie) it corresponded to. This can be extended to reconstruct the stimuli from scratch (this tales a little more work so I'll return to it in the end).
+# The experiment we will be analyzing is very simple. Subjects viewed a movie (the stimulus) inside an fMRI scanner. Our method will use this data to build a model that takes the recorded fMRI data and predicts which stimulus (which frame in the movie) it corresponded to. This can be extended to reconstruct the stimuli from scratch (which they do in the paper but I won't here as it takes a bit more work, I'll return to it in the end).
 # 
 # The approach has two steps. 
 # 
-# 1) Build a model that takes in movie frames and predics brain activity (aka encoding model)
-# 2) Invert the encoding model to take in brain activity and predict the stimulus (dedcoding model)
+# 1) Build a model that takes in movie frames and predicts brain activity - the encoding model
+# 2) Invert the encoding model to take in brain activity and predict the stimulus - decoding model
 # 
-# I will cover the experimental details as I go along, but it would be easier to follow after reading the paper, which you find here. I will link a couple more useful paper in the end. 
+# I will cover the experimental details as I go along, but it would be easier to follow after reading the paper, which you find [here]:(https://gallantlab.org/_downloads/2011a.Nishimoto.etal.pdf). I will list a couple more useful paper in the end. 
+# 
+# <u>**Note**<u>
+#     
+# This is not a python or machine learning tutorial. The point is to give an example of the high level structure of an encoding-decoding approach. I assume things like cross validation and regularization are familiar to the reader.
 
-# ## The data
+# # The data
 
 # The data from the paper is kindly hosted at https://portal.nersc.gov/project/crcns/download/vim-2. 
 # You will need to create a free account to access it. 
 # 
 # The VoxelResponses_subject*.tar.gz files contain the brain data. Download and extract them. 
 # 
-# The Stimuli.tar.gz file contains the actual stimulus (the movies) viewed by the subjects. You can download and play the movies (the data is an array of frames). We will not actually directly needs this though, so you don't have to download it. 
+# The Stimuli.tar.gz file contains the actual stimulus (the movies) viewed by the subjects. You can download and play the movies (the data is an array of frames), but we will not actually directly needs this though, so you don't have to download it. 
 
-# ### Load the data 
+# ## Load the data 
 
-# Let's have a look at subject1's data. You would have noticed that the data is a .mat format, which is what matlab uses. We can access it using the h5py package.
+# Let's have a look at subject1's data.
+# 
+# You would have noticed that the data is a .mat format, which is what MATLAB uses. We can access it using the h5py package.
 # 
 # The file has four fields.
 # 
 # ei - contains general information about the experiment 
 # roi - stands for region of interest. These labels tell us which part of the data belongs to what anatomical structure. 
 # rt - data used for the training the (encoding and decoding) models in the paper
-# rv - data used for validating the models
-# rva - data used for validating the models, before averaging. I will explain this later
+# rv - data used for testing the models (sometime referred to as validation data, but that can be confusing when cross-validation is discussed, so I will call this the test data.)
+# rva - data used for testing the models, *before* averaging. I will explain this later
 # 
 # Lets load the data
 
-# In[1]:
+# In[2]:
 
 
 import h5py
 
 
-# In[2]:
+# In[20]:
 
 
-sn_data_fld = '/mount/nfs5/drorcohen/Nishimoto2011Data/' #path/to/folder/with/data
-sn_data_typ = 'VoxelResponses_subject2.mat'
+
+sn_data_fld = '../Nishimoto2011Data/' #path/to/folder/with/data
+# will use subject 1 here
+sn_data_typ = 'VoxelResponses_subject1.mat'
 sn_data_fl = sn_data_fld + sn_data_typ
 
 # read the data
@@ -58,11 +66,11 @@ with h5py.File(sn_data_fl, 'r') as f:
     # these are the things we have here
     print(f.keys())
     
-    # validation data, before averaging across trials
-    val_data = f['rva'][()]
+    # testidation data, before averaging across trials
+    test_data = f['rva'][()]
 
-    # validation data after averaging across trials
-    val_data_ave = f['rv'][()]
+    # testidation data after averaging across trials
+    test_data_ave = f['rv'][()]
 
     # training data
     trn_data = f['rt'][()]
@@ -82,103 +90,73 @@ with h5py.File(sn_data_fl, 'r') as f:
     roi_dict =  {key:rois[key][()] for key in rois.keys()}
 
 
-# In[3]:
+# In[4]:
 
 
 print(f"training data shape is {trn_data.shape}")
-print(f"validation data shape is {val_data.shape} (val_data) and {val_data_ave.shape} (val_data_ave)")
+print(f"testidation data shape is {test_data.shape} (test_data) and {test_data_ave.shape} (test_data_ave)")
 
 
-# The train data shape is (73728, 7200) and reflexts voxelsXsamples.
-# A voxel (volume pixel?) is what we call a 3D "brain pixel". In this experiment each voxel is 2x2x2.5 mm. The 73728 voxels reflect a 64x64x18 "box" which has been flattened to one axis.
+# The training data shape is (73728, 7200) corresponds to  voxels X samples.
+# A voxel is what we call a 3D "brain pixel". In this experiment each voxel is 2x2x2.5 mm. The 73728 voxels reflect a 64x64x18 "box" around the subjects head which has been flattened to one axis.
 # 
-# In this experiment the temoral resolution of the fMRI is 1 second, so the 7200 samples reflect 7200s (2 hours) of movie viewing.
-# In total, the training data has 7200 samples of data for each of 73728 voxels. fMRI data is collected over multiple "runs" - short episods of data collection. In this experiment the training data reflects 12 runs of 10 minuntes each (this will be important later).
+# In this experiment the temporal resolution of the fMRI is 1 second, so the 7200 samples reflect 7200s (2 hours) of movie viewing.
+# To sum up, the training data has 7200 samples for each of 73728 voxels. fMRI data is collected over multiple "runs" - short episodes of data collection (as opposed to a continuous 2hr stint). In this experiment the training data comprises 12 runs of 10 minutes each (this will be important later).
 # 
-# The val_data shape is (73728, 10, 540). This reflects voxelsXrepeatsXsamples. The validation data shape is different because for the validation experiment the subject watched the same movie 10 times. Averaging over these repeated presentations increases the signal to noise ratio of the brain response and produces better encoding and decoding results then using a single presentation. The val_data variable reflects the unaveraged data, whereas the val_data_ave reflects the same data after averaging over the 10 repeats. We will use the latter.  
+# The test_data shape is (73728, 10, 540). This reflects voxels X repeats X samples. The testing data shape is different because for the testing experiment the subject watched the same movie 10 times. Averaging over these repeated presentations increases the signal to noise ratio of the brain response and produces better encoding and decoding results then using a single presentation. The test_data variable reflects the unaveraged data, whereas the test_data_ave reflects the same data after averaging over the 10 repeats. 
 # 
 # <u>Some things to note<u>.
 # 
 # From a modern machine learning perspective, there is actually very little data to work with. However, 7200 is actually lot for an fmri experiment. Most experiment will have a fraction of that. The scarcity of data places constraints on the sort of models we can use. Complex models (such as DNNs) cannot generally be trained end-to-end on this amount of data. For the most part we get around this by using simpler models or pre-trained DNNs.
 # 
-# Raw data that comes of the fMRI machine needs to be processed to deal with things like subject movement in the scanner and alignment of the brain between sessions. fMRI pre-processing is not at all trivial and an ongoing area of research. The data above is already pre-processed (you can see the details in the paper) and I will use it as is. 
+# Raw data that comes of the fMRI machine needs to be pre-processed to deal with things like subject movement in the scanner and alignment of the brain between sessions. fMRI pre-processing is not at all trivial and an ongoing area of research. The data above is already pre-processed (you can see the details in the paper) and I will use it as is. 
 # 
-# If you are like me you are probably itching to get some nice looking brain picture with this data. Unfortunately, doing this requiers a bit more work and is tangential to what I will do here. If you are interested in pursuuing this have a look at the anatomy.zip files. I suggest having a look at nilearn package for getting some quick plots. If you are more serious about this look into pycortex - it's worth suffering through the learning curve. I may cover this kind of thing in the future.
+# If you are like me you are probably itching to get some nice looking brain picture with this data. Unfortunately, doing this requires a bit more work. Basically we need to get a nice anatomical image of the brain and then dress the fMRI data on top of it. If you are interested in pursuing this have a look at the anatomy.zip files. I suggest having a look at nilearn package for getting some quick plots. If you are more serious about this look into pycortex - it's worth suffering through the learning curve. I may cover this kind of thing in the future.
 
 # ## Check the data
 
 # There are many voxels, but some of them may actually reflect non-neuronal matter such as skull. Others may just be corrupt. 
-# Let's get rid of the bad ones. We will also transpose the data to the more conventional sampsXfeatures format.
+# Let's get rid of the bad ones. We will also transpose the data to the more conventional samps X features format.
 
-# In[4]:
+# In[21]:
 
 
 import numpy as np
 
 
-# In[5]:
+# In[25]:
 
 
-print("check for nans")
+print("checking for nans")
 # voxels with nan in training data set
 train_nans  = np.any(np.isnan(trn_data),axis=1)
-# voxels with nan in validation 
-val_nans = np.any(np.isnan(val_data.mean(1)),axis=1)
-# voxels with nans in either training or validation
-train_and_val_nans = train_nans | val_nans
+# voxels with nan in testidation 
+test_nans = np.any(np.isnan(test_data.mean(1)),axis=1)
+# voxels with nans in either training or testidation
+train_and_test_nans = train_nans | test_nans
 
+print("dropping nans...")
 # drop the nan voxels, and tranpose to get samples x features
-trn_data_nonan = trn_data[~train_and_val_nans,:].T
-val_data_nonan = val_data[~train_and_val_nans,:].transpose(2,1,0)
-val_data_ave_nonan = val_data_ave[~train_and_val_nans,:].T
+trn_data_nonan = trn_data[~train_and_test_nans,:].T
+test_data_nonan = test_data[~train_and_test_nans,:].transpose(2,1,0)
+test_data_ave_nonan = test_data_ave[~train_and_test_nans,:].T
     
 # now adjust the rois for the the rejected voxels
 roi_dict_nonans = {} 
 for roi_key in roi_dict.keys():
-    roi_dict_nonans[roi_key] = roi_dict[roi_key].flatten()[~train_and_val_nans]
+    roi_dict_nonans[roi_key] = roi_dict[roi_key].flatten()[~train_and_test_nans]
 
-
-# In[6]:
-
-
-tmps = (f'after nan removal:\nshape of training data is {trn_data_nonan.shape},\nshape of val data is {val_data_nonan.shape}\nshape of averaged val data is {val_data_ave_nonan.shape}')
+tmps = (f'after nan removal:\nshape of training data is {trn_data_nonan.shape},\nshape of test data is {test_data_nonan.shape}\nshape of averaged test data is {test_data_ave_nonan.shape}')
 print(tmps)
 
 
-# I previously mentioned that the val_data_ave_nonan is a the average of val_data_nonan.
+# I previously mentioned that the test_data_ave_nonan is a the average of test_data_nonan.
 # Let's check:
-
-# In[7]:
-
-
-print(np.all(np.isclose(val_data_nonan.mean(1).flatten(),val_data_ave_nonan.flatten())))
-
 
 # In[8]:
 
 
-# import numpy as np
-# import matplotlib.pyplot as plt
-# import os
-# import sys
-# import scipy as sp
-# import pickle as p
-# import logging
-
-
-# In[ ]:
-
-
-
-
-
-# In[9]:
-
-
-# # this is where my clone of Alex Huth ridge regression toolbox is (https://github.com/alexhuth/ridge)
-# sys.path.insert(0, '/mount/nfs/drorcohen/pystuff/')
-# from ridge import ridge, ridge_corr, bootstrap_ridge
-# from ridge import utils as ridge_utils
+print(np.all(np.isclose(test_data_nonan.mean(1).flatten(),test_data_ave_nonan.flatten())))
 
 
 # ### Basic check of data distribution 
@@ -188,29 +166,31 @@ print(np.all(np.isclose(val_data_nonan.mean(1).flatten(),val_data_ave_nonan.flat
 
 # #### Figure 1 - Distribution of means and stds
 
-# In[46]:
+# In[11]:
 
 
 import matplotlib.pyplot as plt
 plt.rcParams["font.size"] = "20"
 
 
-# In[48]:
+# In[28]:
 
 
 # look at distribution of means
 plt.figure(figsize=(15,15))
 plt.subplot(2,2,1)
 plt.ylabel("num vox")
+plt.xlabel("means")
 #train data
 plt.hist(trn_data_nonan.mean(1));
 plt.xlim([-0.5,0.5])
 plt.title("TRAIN data mean dist.")
 plt.subplot(2,2,2)
-#val data
-plt.hist(val_data_ave_nonan.mean(1))
+plt.xlabel("means")
+#test data
+plt.hist(test_data_ave_nonan.mean(1))
 plt.xlim([-0.5,0.5])
-plt.title("VAL data mean dist.")
+plt.title("TEST data mean dist.")
 
 # standard deviations
 plt.subplot(2,2,3)
@@ -218,58 +198,60 @@ plt.subplot(2,2,3)
 plt.hist(trn_data_nonan.std(1));
 plt.xlim([0,1.2])
 plt.ylabel("num vox")
+plt.xlabel("stds")
 plt.title("TRAIN data std dist.")
 plt.subplot(2,2,4)
-#validation
-plt.hist(val_data_ave_nonan.std(1))
+#testidation
+plt.hist(test_data_ave_nonan.std(1))
 plt.xlim([0,1.2])
-plt.title("VAL data std dist.")
+plt.xlabel("stds")
+plt.title("TEST data std dist.")
 
 
-# We can see above the the trainind data is indeed roughly zscored (note that in the paper the zscoring is performed for each run seperately whereas here we performed it across all runs). 
+# We can see above the the training data is roughly zscored (note that in the paper the zscoring is performed for each run separately whereas here we performed it across all runs). 
 # 
-# Validation data has mean around 0, but std is clearly nowhere near 1. 
+# test data has mean around 0, but std is clearly nowhere near 1. 
 # 
-# Below we zscore the validatioan data
+# Let's fix that. 
 
-# ### Zscore the val data
+# ### Zscore the test data
 
-# In[12]:
+# In[29]:
 
 
 # z-scoring from scipy - always use existing implementaions if possible!
 from scipy.stats import zscore
 
 
-# In[13]:
+# In[30]:
 
 
-## Zscore the val data
-val_data_ave_nonan = zscore(val_data_nonan,axis=0).mean(1)
+## Zscore the test data
+test_data_ave_nonan = zscore(test_data_nonan,axis=0).mean(1)
 
 
 # # Load the stimululs data
 
-# The stimulus data proided the repository consists of the movie frames shown to subjects during training and validation.
+# The stimulus data in the repository consists of the movie frames shown to subjects.
 # 
 # The whole thing about encoding models is to extract some useful features from this high dimensional data and see if these can be related to the brain response. A bit like feature engineering. 
 # 
-# One of the key contributions of the paper is the introduction of the Motion Energy (ME) features. These are basically spatiotemporal Gabors applied at different frequencies and scales. If you are interested in the details have a look at the supporting information of the paper.
+# One of the key contributions of the paper is the introduction of the Motion Energy (ME) features. These are spatiotemporal Gabors applied at different frequencies and scales. If you are interested in the details have a look at the supporting information of the paper.
 # 
-# You can compute the motion energy features by putting the raw stimulus through the ME computation. You can find Matlab code here https://github.com/gallantlab/motion_energy_matlab. 
+# You can compute the motion energy features by putting the raw stimulus through the ME computation, for which MATLAB code is available [here]:(https://github.com/gallantlab/motion_energy_matlab). 
 # 
-# For your convenice I have pre-computed the features and put them up on figshare.
+# For your convenience I have pre-computed the features and put them up on [figshare]:(https://figshare.com/s/7a0e82ae48a7edf48216).
 # 
 # Let's load them.
 
-# In[14]:
+# In[40]:
 
 
 # My ME estimates are here
-ME_fldr = "/mount/nfs5/drorcohen/Nishimoto2011Data/" #path/to/ME/features
+ME_fldr = "../Nishimoto2011Data/" #path/to/ME/features
 
 
-# In[15]:
+# In[47]:
 
 
 # training
@@ -277,21 +259,17 @@ fl_typ ="Stimuli_trn_luminance_Gabor_log_downsamp_zscr.mat"
 with h5py.File(ME_fldr + fl_typ,'r') as ME_stim_fl:
     ME_stim_trn = ME_stim_fl.get("S_fin")[()].T
 
-# validation
+# test data
 fl_typ ="Stimuli_val_luminance_Gabor_log_downsamp_zscr.mat" 
 with h5py.File(ME_fldr + fl_typ,'r') as ME_stim_fl:
-    ME_stim_val = ME_stim_fl.get("S_fin")[()].T
-
-
-# In[16]:
-
-
-# shapes should match with the neural data
-tmps = (f'shape of training data is {ME_stim_trn.shape},\nshape of val data is {ME_stim_val.shape}')
+    ME_stim_test = ME_stim_fl.get("S_fin")[()].T
+    
+# samples should match with the neural data
+tmps = (f'shape of training data is {ME_stim_trn.shape},\nshape of test data is {ME_stim_test.shape}')
 print(tmps)
 
 
-# The shape of ME_stim_val and ME_stim_trn reflects samplesXfeatures. The 6555 features consists of passing the images through a set of spatio temporal Gabor wavlets with different centers, spatial frequcies, temporal frequencies and orientations.
+# The shape of ME_stim_test and ME_stim_trn reflects samplesXfeatures. The 6555 features consists of passing the images through a set of spatio temporal Gabor wavlets with different centers, spatial frequcies, temporal frequencies and orientations.
 # 
 # Now we are ready to built a model that takes the ME as inputs and predict brain responses - our encoding model! 
 
@@ -300,54 +278,54 @@ print(tmps)
 # ### The secret 
 # Our encoding model is linear (mic drop). 
 # 
-# That is, we are going to model the response at voxl i time t $r_{it}$ as a linear functions of the stimulus (S, in our case the 6555-dimensional motion energy features) at times $t-k$ to $t-p$. k and p determine how far back we look in order to predict the activity. 
+# That is, we are going to model the response at voxel i time t ($r_{it}$) as a linear functions of the stimulus (S, in our case the 6555-dimensional motion energy features) at times $t-k$ to $t-p$. k and p determine how far back we look in order to predict the neural activity. 
 # 
 # $r_t^i = \sum_{d=p}^{k}S_{t - d} w_{id}$
 # 
 # The objective is to estimate $w_{id}$ for each voxel and delay. 
 # 
 # ### What delays shold we use?
-# fMRI does not reflect direct neuronal activity. Instead, fMRI data, known as BOLD (Blood-oxygen-level-dependent) actualy reflects changes in oxygenated and deoxgenated blood. The theory goes that as neurons start working they use up oxygen and this is reflected in the relative levels of oxygenated and deoxgenated blood. This response is delayed - the BOLD signal peaks 2-6 seconds after the neurons start working. 
+# fMRI does not reflect direct neuronal activity. Instead, fMRI data, known as BOLD (Blood-oxygen-level-dependent) actually reflects changes in oxygenated and deoxgenated blood. The theory goes that as neurons start working they use up oxygen and this is reflected in the relative levels of oxygenated and deoxgenated blood. This response is delayed - the BOLD signal peaks 2-6 seconds after the neurons start working. 
 # 
 # In the paper they used delays of 3 to 6 seconds. 
 # 
 # ### Regularization
-# You are probably thinking with 6555*4 features and only 7200 samples we are going to have issues, and you are right. To deal with this we will use regularization. In the paper they used L1, but here I will use L2, aka ridge regression. In my informaal conversations with Shinji Nishimoto about this I learn that L1 can give slightly better results. However the difference is small and ridge is faster to fit (L2 optimization is convex). 
+# You are probably thinking a feature vector size 6555*4 (t-3 to t-6) features and only 7200 samples we are going to have issues, and you are right. To deal with this we will use regularization. In the paper they used L1, but here I will use L2, aka ridge regression. In my informal conversations with Shinji Nishimoto about this I learned that L1 can give slightly better results. However, the difference is small and I have very nice code for ridge cross validation. 
 # 
 # ### How to fit
-# Sklearn and other popular packages all support ridge. I have used them in the past and they are perfectly fine. 
-# However, Alex Hutz developed his own implementation which is optimized for this kind of thing. In particulr the cross validation procedure uses some tricks and is much quicker than what you'll get out of sklearn (though I admit I never benchmarked it). You can get it from [here](https://github.com/alexhuth/ridge). 
+# sklearn and other popular packages all support ridge. I have used them in the past and they are perfectly fine. 
+# However, Alex Hutz developed his own implementation which is optimized for this kind of thing. In particular the cross validation procedure uses some tricks and is much quicker than what you'll get out of sklearn (though I admit I never benchmarked it). You can get it from [here](https://github.com/alexhuth/ridge). 
 
-# In[103]:
+# In[49]:
 
 
 import sys
-sys.path.insert(0, '/mount/nfs/drorcohen/pystuff/')
+sys.path.insert(0, '/mount/nfs/drorcohen/pystuff/') #path/to/ridge/package/
 from ridge import ridge_corr, bootstrap_ridge
 from ridge.ridge import ridge as fit_ridge
 from ridge import utils as ridge_utils
 
 
-# We can use the functionality of this toolbox to stack the stimulis for the desired delays.
+# The package includes some utilities to stack the stimulus across the desired delays.
 # That is, take stimulus at times t-3,t-4,t-5 and t-6 and stack them into a 4*6555 long vector
 
-# In[18]:
+# In[50]:
 
 
 # stack the Stimulus for the selected delays
 delays=np.arange(3,6+1)
 # train data
 ME_stim_trn_dly = ridge_utils.make_delayed(ME_stim_trn,delays)
-# val data
-ME_stim_val_dly = ridge_utils.make_delayed(ME_stim_val,delays)
+# test data
+ME_stim_test_dly = ridge_utils.make_delayed(ME_stim_test,delays)
 
 
 
 # ## Trimming the data
 
-# Before fitting we are going to drop some data. Specificaly, the first few samples from each fMRI run reflect activity from some time before the experiment stated (due to the BOLD delay). In addition, the first few samples may be a bit noise. In the paper they drop the first six samples of each run. 
+# Before fitting we are going to drop some data. The first few samples from each fMRI run reflect activity from some time before the experiment started (due to the BOLD delay). In addition, the first few samples may be a bit noisy (or non-steady). In the paper they drop the first six samples of each run. 
 
-# In[19]:
+# In[51]:
 
 
 vols_to_drop = 6
@@ -355,44 +333,53 @@ vols_to_drop_inds = np.arange(vols_to_drop)
 
 # trainin data has 12 blocks of 600s
 num_runs = 12
+# size of each run
 blk_sz = trn_data_nonan.shape[0]//num_runs
+#offsets for each run
 trn_block_multipliers = np.arange(num_runs)*blk_sz
 #use broadcasting to get the inds
 trn_inds_to_drp = (vols_to_drop_inds[np.newaxis,:]+trn_block_multipliers[:,np.newaxis]).flatten()
+
+#will create a mask to drop these volumes
 tmp_mask = np.ones(trn_data_nonan.shape[0],dtype=bool)
 tmp_mask[trn_inds_to_drp] = False
+
+#drop them
 trn_data_nonan_dly = trn_data_nonan[tmp_mask,:]
 
 # do the same to the stimulus
 ME_stim_trn_dly = ME_stim_trn_dly[tmp_mask,:]
 
 
-# The validation data was recorded in one run, so we need to drop the first 6 samples here too. 
-# However, the validation data consists of 9 chunks of 60s movies. These were actualy randomized during the repeated presentation. For example during the first presentation of the validation data the order of the movies may have been [0,3,5,8,2,7,9,1,4,6], the second presentation [9,5,6,3,1,8,7,4,2,0] etc.
+# The test data was recorded in one run, so we need to drop the first 6 samples here too. 
 # 
-# Thankfuly, these all have been aligned in the supplied data. However, due to the BOLD delay, the first few samples at the start of each movie actully correspond to the movie preceeding it. To get passed data we will remove the first 6 samples of each movie 
+# However, the test data consists of 9 chunks of 60s movies. The presentation of these movies was randomized for each repeat. For example during the first presentation of the test data the order of the movies may have been [0,3,5,8,2,7,9,1,4,6], the second presentation [9,5,6,3,1,8,7,4,2,0] etc.
+# 
+# Thankfully, these have already been aligned in our data. However, due to the BOLD delay, the first few samples at the start of each movie actually correspond to the movie preceding it. To get passed this we will also remove the first 6 samples of each movie. 
 
-# In[20]:
+# In[53]:
 
 
 # can recycle the code from above
-num_runs = 9
-blk_sz = val_data_ave_nonan.shape[0]//num_runs
-val_block_multipliers = np.arange(num_runs)*blk_sz
+num_movies = 9 #
+blk_sz = test_data_ave_nonan.shape[0]//num_movies
+test_block_multipliers = np.arange(num_movies)*blk_sz
 #use broadcasting to get the inds
-val_inds_to_drp = (vols_to_drop_inds[np.newaxis,:]+val_block_multipliers[:,np.newaxis]).flatten()
-tmp_mask = np.ones(val_data_ave_nonan.shape[0],dtype=bool)
-tmp_mask[val_inds_to_drp] = False
-val_data_ave_nonan_dly = val_data_ave_nonan[tmp_mask,:]
-ME_stim_val_dly = ME_stim_val_dly[tmp_mask,:]
+test_inds_to_drp = (vols_to_drop_inds[np.newaxis,:]+test_block_multipliers[:,np.newaxis]).flatten()
+tmp_mask = np.ones(test_data_ave_nonan.shape[0],dtype=bool)
+tmp_mask[test_inds_to_drp] = False
+test_data_ave_nonan_dly = test_data_ave_nonan[tmp_mask,:]
+ME_stim_test_dly = ME_stim_test_dly[tmp_mask,:]
 
 
 # ## Fitting the model using Ridge Regression
 
 # ## parameters
-# Finally we can fit the encoding model. We will use cross-validation to estimate the regularization parameters. We will specify the cross validation parameters below.
+# Finally we can fit the encoding model. We will use cross-validation to estimate the regularization parameters. 
+# 
+# We will specify the cross cross-validation parameters below.
 
-# In[57]:
+# In[54]:
 
 
 # this will keep us informed as training proceeds
@@ -404,13 +391,13 @@ logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s',
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# These are all the regularization parameter (alpha) values we'll check
+# These are all the regularization parameter (alpha) testues we'll check
 alphas = np.logspace(1, 4, 40)
-# number of times we will do the cross validation. These would typically be 15-40. However that can take a long time
+# number of times we will do the cross testidation. These would typically be 15-40. However that can take a long time
 # FOR ILLUSTRATION ONLY I will just run this twice
 nboots = 2#20
 
-# the cross val works by getting block of contigous data (as opposed to each sample independently).
+# the cross test works by getting block of contigous data (as opposed to each sample independently).
 # How long do we want these blocks to be. Alex Huth recommends having this 3-4 times the delay, which is 6 here
 chunklen = 4 * delays[-1] #
 
@@ -424,8 +411,8 @@ nchunks_test = int((pct_test)*trn_data_nonan_dly.shape[0]//chunklen)
 # Classicaly this is the MSE, but in fMRI studies we often use the correlation. I can see argument for and against this, but thats a different topic
 use_corr = True
 
-# the logger will tell us how many voxels are above this value. 
-# If cross val is workes, this should increase, reach a maximum, and then decrease
+# the logger will tell us how many voxels are above this testue. 
+# If cross test is workes, this should increase, reach a maximum, and then decrease
 corrmin = 0.2
 
 # use seperate alpha for each voxel. The alternative is to use the same alpha for all voxels
@@ -446,7 +433,7 @@ print(cv_p)
 
 # ## Do it 
 
-# We will use the very convinient *bootstrap_ridge* function to do the cross val for us and fit the model. Heres the important bits from the docstring:
+# We will use the very convenient *bootstrap_ridge* function to do the cross test for us and fit the model. Here are the important bits from the docstring:
 # 
 # ____
 # 
@@ -457,7 +444,7 @@ print(cv_p)
 #     Presp,
 #     alphas,...)
 #     
-# Uses ridge regression with a bootstrapped held-out set to get optimal alpha values for each response. The best alpha value for each response will be
+# Uses ridge regression with a bootstrapped held-out set to get optimal alpha for each response. The best alpha for each response will be
 # averaged across the bootstraps to estimate the best alpha for that response.
 # 
 # <u>Parameters<u>
@@ -488,7 +475,7 @@ print(cv_p)
 # If [return_wt] is True, regression weights for N features and M responses. If [return_wt] is False, [].
 # 
 # corrs : array_like, shape (M,)
-# Validation set correlations. Predicted responses for the validation set are obtained using the regression
+# validation set correlations. Predicted responses for the validation set are obtained using the regression
 # 
 # weights: pred = np.dot(Pstim, wt), and then the correlation between each predicted response and each 
 # column in Presp is found.
@@ -504,62 +491,69 @@ print(cv_p)
 #     
 # ___
 
-# In[58]:
+# In[55]:
 
 
 wt, corr, valphas, bscorrs, valinds = bootstrap_ridge(ME_stim_trn_dly, # training set stimuli
                                               trn_data_nonan_dly, # training set bold response
-                                              ME_stim_val_dly, # test set stimuli 
-                                              val_data_ave_nonan_dly, # test bold response
+                                              ME_stim_test_dly, # test set stimuli 
+                                              test_data_ave_nonan_dly, # test bold response
                                               **cv_p)
 
 
 # ### Probs a good idea to save righ around here
 
-# In[59]:
+# In[ ]:
 
 
 # tmp save of the model, to avoid training again if/when it crashes
 # np.savez("./trained_model.npz"
 #          wt=wt,
 #          corr=corr,
-#          valphas=valphas,
+#          testphas=testphas,
 #          bscorrs=bscorrs,
-#          valinds=valinds
+#          testinds=testinds
 #         )
 
 
 # ### Load saved model
 
-# In[60]:
+# In[ ]:
 
 
 # load
 # with np.load("./trained_model_09072020%s.npz"%sn_data_typ[-12:-4]) as f:
 #     wt = f['wt']
 #     corr = f['corr']
-#     valphas = f['valphas']
+#     testphas = f['testphas']
 #     bscorrs = f['bscorrs']
-#     valinds = f['valinds']
+#     testinds = f['testinds']
 
 
-# ## Check the cross val
+# ## Check the cross validation
 
-# If the cross val identified the peak performance then we shuold see a clear maximum acroos the alpha values
+# If the cross test identified the peak performance then we should see a clear maximum for some alpha value.
+# 
+# For simplicity we will average across all voxels.
 
-# In[61]:
+# In[59]:
 
 
-# peak in this graph confirms cross val did what it should
+# peak in this graph confirms cross test did what it should
 plt.plot(np.log10(alphas),np.mean(bscorrs,axis=(1,2)))
 plt.ylabel("average prediction accuracy")
 plt.xlabel("log(alpha)")
 
 
-# ## Chek - predictio accuracy at two different ROIS 
+# ## Check - prediction accuracy at two different ROIS 
 
 # Let's also look at how the prediction accuracy differs between different brain areas. 
-# We will look at (1) v1 - the earliest cortical stage of visual processing and (2) V3 a higher level of visual processing. Higher level of visual processing respond to higher level categories. Since the ME features are relativily low level (Gabors), we would expect predictio accuracy to be higher in V1 compared to V3. Let's see.
+# We will look at 
+# 
+# - V1 - the earliest cortical stage of visual processing and 
+# - V3 a higher level of visual processing. 
+# 
+# Higher level of visual processing respond to higher level categories. Since the ME features are relatively low level (Gabors), we would expect prediction accuracy to be higher in V1 compared to V3. Let's see.
 
 # #### Figure 2
 
@@ -570,7 +564,7 @@ roi1 = 'v1lh' #v1, left hemisphere
 roi2 = 'v3lh' #v3, left hemisphere
 
 
-# In[64]:
+# In[63]:
 
 
 f,ax = plt.subplots(1,1,figsize=(10,10))
@@ -610,15 +604,15 @@ plt.legend(["V1","V3"],fontsize=20)
 # ## Choosing meaningful voxels
 # Many parts of the brain are not concerned with motion energy and the prediction accuracy in these parts is low. There is no point using those brain areas in reconstruction. 
 # 
-# Here I will choose best 2000 voxels as assessed using the cross validation accuracy (in the paper they choose the best 2000 out of V1, V2 and V3). This is important because there would be a bit of double dipping if I chose the voxels based on their performance on the test set. 
+# Here I will choose best 2000 voxels as assessed using the cross testidation accuracy (in the paper they choose the best 2000 out of V1, V2 and V3). This is important because there would be a bit of double dipping if I chose the voxels based on their performance on the test set. 
 
-# In[90]:
+# In[64]:
 
 
 # number of voxels we will use for reconstruction
 N=2000
 
-#cross val predictions accuracy for each alpha
+#cross test predictions accuracy for each alpha
 mean_corr_acrossboot = bscorrs.mean(-1)
 # location of best alpha for each voxel
 best_corr_ind = np.argmax(mean_corr_acrossboot,0)
@@ -649,9 +643,9 @@ topN = srt_corrs[-N:]
 # shrunk} = (1-\alpha_{decode})\hat{\Sigma} + \alpha_{decode}\frac{{\rm
 # Tr}\hat{\Sigma}}{p}\rm Id$
 # 
-# You can read more about this shrunk estimate [here](https://scikit-learn.org/stable/modules/covariance.html). What we need to estimate is $\alpha_{decode}$. We will luse the cross validation for this as well.
+# You can read more about this shrunk estimate [here](https://scikit-learn.org/stable/modules/covariance.html). What we need to estimate is $\alpha_{decode}$. We will luse the cross testidation for this as well.
 
-# In[91]:
+# In[65]:
 
 
 from sklearn.covariance import shrunk_covariance
@@ -659,7 +653,7 @@ from sklearn.covariance import shrunk_covariance
 
 # As mentioned we will also want a function of calculating the mahalanobis. Scipy has an inbuilt one. However it is painfully slow. Here we have no choice but to reinvent the wheel (or rather steal a reinvented wheel from stackoverflow. Same diff)
 
-# In[92]:
+# In[66]:
 
 
 def faster_mahalanobis(x,y,VI):
@@ -686,7 +680,7 @@ def faster_mahalanobis(x,y,VI):
 # ### Getting the MAP
 # This handy function gets the MAP for us - simply choosing the min across the mahalanobis distance array
 
-# In[93]:
+# In[67]:
 
 
 # this utility function computes the average map estimate given a dist matrix
@@ -697,7 +691,7 @@ def MAP_score(dist,axis=1):
         Args:
             dist (array): An array of distances between two sets of vectors
             axis (int): The axis along which the predictions are made. Default is 1.
-            This means that the distance representes values between the actual observed values in rows, 
+            This means that the distance representes testues between the actual observed testues in rows, 
             and a bunch of candidate predictions that were used with matching inputs. 
 
         Returns:
@@ -706,14 +700,14 @@ def MAP_score(dist,axis=1):
     """
     # where is the MAP estimate
     MAPs = np.argmin(dist,axis=axis)
-    # does it match with the correct value - i.e. does it lie along the diagonal? 
+    # does it match with the correct testue - i.e. does it lie along the diagonal? 
     ave_score = (np.arange(len(MAPs)) == MAPs).mean()
     return ave_score, MAPs
 
 
-# ## Use cross vall to estimate the shrinkage parameter
+# ## Use cross testl to estimate the shrinkage parameter
 
-# In[94]:
+# In[68]:
 
 
 # the shrinkage estimates we will test
@@ -725,7 +719,7 @@ scores = np.zeros((nboots,len(shrinkages)))
 
 # We will carry out the CV using the same indicies as the encoding model. It is important to get this right because we do not want information somehow leaking across the folds. 
 
-# In[95]:
+# In[71]:
 
 
 # use the same CV parameters as the ridge reg
@@ -733,7 +727,7 @@ allinds = np.arange(trn_data_nonan_dly.shape[0])
 valinds = np.array(valinds)
 
 
-# In[ ]:
+# In[75]:
 
 
 for split in range(nboots):
@@ -747,12 +741,10 @@ for split in range(nboots):
     split_test = trn_data_nonan_dly[np.ix_(held_inds,topN)]
     split_ME_train = ME_stim_trn_dly[not_held_inds,:]
     split_ME_test = ME_stim_trn_dly[held_inds,:]
-    print(split_ME_train.shape)
-    print(split_ME_test.shape)
     
     # retrain the model using the optimal alpha
     split_wt = fit_ridge(split_ME_train, split_train, valphas[topN])
-#     Ridge_obj = ridge(valphas[topN], fit_intercept=False, solver='svd')
+#     Ridge_obj = ridge(testphas[topN], fit_intercept=False, solver='svd')
 #     split_wt=Ridge_obj.fit(split_ME_train,split_train).coef_.T
     
     #  model predictions for this split
@@ -777,12 +769,12 @@ for split in range(nboots):
             dist = faster_mahalanobis(split_test,split_test_preds,VI=VI)
             # get the identification score for this 
             ave_score, MAPs = MAP_score(dist,axis=1)
-            print(f'shrink val: {shrinkage:.4f}, score: {ave_score:.4f}')
+            print(f'shrink test: {shrinkage:.4f}, score: {ave_score:.4f}')
             scores[split,cntr2] = ave_score
     print("\n")
 
 
-# In[40]:
+# In[76]:
 
 
 # save them cause the above can take a bit of time
@@ -795,7 +787,7 @@ for split in range(nboots):
 #          random_states = random_states)
 
 
-# In[41]:
+# In[77]:
 
 
 # load
@@ -805,134 +797,148 @@ for split in range(nboots):
 #     scores = f['scores']
 
 
-# ### Check the shrinkage - do we get a maximum decoding at some intermediate value?
+# ### Check the shrinkage cross validation
+# Do we get a maximum decoding at some intermediate value?
 
 # #### Figure 3
 
-# In[43]:
+# In[84]:
 
 
-plt.xlabel("log(shrinkage)")
-plt.ylabel("identification accuracy")
-plt.title("shaded area is +/- 1 std")
-scores_mean = scores.mean(0)
+plt.figure(figsize=(5,5))
+plt.xlabel("shrinkage parameter")
+plt.ylabel("mean decoding accuracy")
+scores_mean = scores.mean(0)*100
 plt.plot(shrinkages,scores_mean);
-plt.show()
+best_shrinkage_ind = np.argmax(scores_mean)
+best_shrink = shrinkages[best_shrinkage_ind]
+plt.scatter(best_shrink,scores_mean[best_shrinkage_ind],marker="s",s=60,color="black")
+plt.title(f"best shrinkage testue is {best_shrink:.3f}")
 
 
-# ### Use best shrinkage estimate for final calculation of cov matrix
+# # Test set decoding accuracy
+# 
+# Now that we have estimated the shrinkage parameter, we can calculate residual covarianec matrix across the entire training set
 
-# In[44]:
+# In[79]:
 
 
-best_shrink = shrinkages[np.argmax(scores_mean)]
-# best_shrink = 1.29
-print(best_shrink)
-
-# recompute to make sure
+# Compute the residual covariance matrix for entire training data
 train_preds = np.dot(ME_stim_trn_dly,wt[:,topN])  
 train_obs = trn_data_nonan_dly[:,topN]
-
 emp_cov =  np.cov(train_obs-train_preds, rowvar=False)
-# V = emp_cov + best_shrink*np.eye(N)
-VI = ShrunkCovariance(shrinkage=best_shrink,assume_centered=True).fit(train_obs-train_preds).precision_#np.linalg.inv(V)
+emp_cov_shrunk = shrunk_covariance(split_cov, shrinkage=best_shrink)
+# the inverse
+VI =np.linalg.inv(emp_cov_shrunk)
 
 
-# # Finally, check how well we identify on the validation data set
+# Get the test set predictions
 
-# In[45]:
-
-
-# get the input and observation for the validation dataset
-val_preds = np.dot(ME_stim_val_dly,wt[:,topN])  
-val_obs = val_data_ave_nonan_dly[:,topN]
+# In[80]:
 
 
-# In[46]:
+test_preds = np.dot(ME_stim_test_dly,wt[:,topN])  
+test_obs = test_data_ave_nonan_dly[:,topN]
+num_test_samples = test_obs.shape[0]
 
 
-# calculate the distance
-dist = faster_mahalanobis(val_obs,val_preds,VI=VI)
-# MAP identification erro
-val_ave_score, val_MAPs = MAP_score(dist,axis=1)
+# In[81]:
 
 
-# #### Figure 4
+# calculate the mahalanobis 
+dist = faster_mahalanobis(test_obs,test_preds,VI=VI)
+# MAP identification error
+test_ave_score, test_MAPs = MAP_score(dist,axis=1)
 
-# In[47]:
+
+# #### Figure 4 - decoding results
+# Here we will create the same figures as Fig 3 A and B from the paper. 
+
+# In[82]:
 
 
-# The distance between all points. 
+# Show the (log) mahalanobis between all points. 
 f,ax = plt.subplots(1,2,figsize=(15,10))
-im = ax[0].imshow(np.log(dist.T))
+im = ax[0].imshow(np.log(dist), origin='lower',cmap = "Greys_r")
+# add a red circle for the MAP estimate 
+ax[0].scatter(np.arange(num_test_samples),test_MAPs,marker="o",color="r")
 plt.colorbar(im,ax=ax[0], shrink=0.5)
 ax[0].set_ylabel("Predicted vol num")
 ax[0].set_xlabel("Observed vol num")
 ax[0].set_title("log mahalanobis")
-# ax[0].scatter(np.arange(val_MAPs.shape[0]),-10-100*correct_vols)
 
-# the identification error
-ax[1].plot(np.arange(val_MAPs.shape[0]),val_MAPs)
-ax[1].plot(np.arange(val_MAPs.shape[0]),np.arange(val_MAPs.shape[0]))
-ax[1].set_ylabel("Predicted vol num")
-ax[1].set_xlabel("Observed vol num")
-correct_vols = val_MAPs==np.arange(val_MAPs.shape[0])
-acc = correct_vols.mean()
-# in the paper we also recompute the accuracy when +/- 1 is allowed
-distance_to_correct_vol = (np.abs(val_MAPs-np.arange(val_MAPs.shape[0]))<=1)
-acc_pm1 = distance_to_correct_vol.mean()
-ax[1].set_title(f'MAP accuracy\n{100*acc:.2f}% (chance is {100/val_MAPs.shape[0]:.2f})\n+/-1 acc is {100*acc_pm1:.2f}%')
+# lets look at how far our estimate was from the correct one
+ground_truth = np.arange(num_test_samples)
+utests,counts = np.unique(test_MAPs-ground_truth,return_counts=True)
 
+ax[1].plot(utests,100*counts/num_test_samples,marker="o",color="red")
+ax[1].set_xlim(-4,4)
+asp = np.diff(ax[1].get_xlim())[0] / np.diff(ax[1].get_ylim())[0]
+ax[1].set_aspect(asp)
 
-# In[ ]:
-
-
-stop
+# in the paper they report the accuracy allowing for +/- 1 errors. This is pretty reasonable because BOLD is slow and does not change too much from second to second.
+acc_plus_minus_1 = 100*counts[(-1<=utests) & (utests<=1)].sum()/num_test_samples
+ax[1].set_title(f'+/-1 acc is {acc_plus_minus_1:.2f}% \n(chance is {100*3/num_test_samples:.2f}%)')
+ax[1].set_ylabel("sample fraction")
+ax[1].set_xlabel("temporal offset (seconds)")
 
 
-# In[ ]:
+# # Conclusion
+# 
 
+# So we saw how to decode visual experience using brain activation. 
+# The approach is fairly simple - invert a linear forward model, but the devil is in the details. 
+# 
+# Many of the  small steps we made above can make a big difference to performance. For example, remember the zscoring of the test set we performed way back when? Check to see what happens if we ignore that. 
+# Remember how we chose delays of 3-6? Try a delay of 1. How about the mahalanobis? Try just using the MSE instead. 
+# 
+# ## Extension
+# ### Reconstructing visual experience
+# What we did here is to decode visual experience as opposed to reconstruct it, which is what the paper is really about. Conceptually this is a small jump. For example to reconstruct the visual experience based on the test data all we need to do is grab the movie frames corresponding to the MAP estimates. 
+# 
+# But what if we didn't actually know what the subject was watching? The trick here is to create a big database of movie clips and corresponding motion energy estimate (the prior). Given a set of data, we use the encoding model to rank the database and simply retrieve the best clip (MAP estimate). In the paper, they report that averaging across the best 100 clips gives better reconstruction results than the MAP.
+# 
+# Conceptually this is simple, but the prior is very large (in the paper they used ~18 million one-second movie clips). I don't have that on hand atm. 
+# 
+# ### Using DNNs
+# The Motion Energy filters work really well. Given the state of modern machine learning, it is natural to use features extracted by deep nets. The field is definitely moving in this direction (check out some of the work by Kamitani lab (references below)).
+# 
+# 
+# 
+# 
+# 
+# 
 
-f,ax = plt.subplots(1,1,figsize=(15,10))
-im = ax.imshow(np.log(dist.T))
-plt.colorbar(im,ax=ax, shrink=0.5)
-ax.set_ylabel("Predicted vol num")
-ax.set_xlabel("Observed vol num")
-ax.set_title("log mahalanobis")
-ax.scatter(np.arange(val_MAPs.shape[0]),-10-100*distance_to_correct_vol)
-
-
-# In[ ]:
-
-
-val_MAPs[~distance_to_correct_vol]
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-plt.hist(np.sum(val_data_ave_nonan_dly[np.ix_(np.where(distance_to_correct_vol)[0],topN)]**2,axis=1))
-plt.hist(np.sum(val_data_ave_nonan_dly[np.ix_(np.where(~distance_to_correct_vol)[0],topN)]**2,axis=1))
-
-
-# In[ ]:
-
-
-plt.plot(val_data_ave_nonan_dly[:,topN].mean(1))
-plt.scatter(np.where(~correct_vols)[0],val_data_ave_nonan_dly[np.ix_(~correct_vols,topN)].mean(1))
-
-
-# In[ ]:
-
-
-np.std(val_data_ave_nonan_dly[:,topN],0)
-
+# # Further reading
+# 
+# - *Encoding and decoding in fMRI*
+# 2011, Thomas Naselarisa, Kendrick N. Kayb, Shinji Nishimotoa, and Jack L. Gallant
+# 
+# A great review about encoding and decoding models in fMRI. 
+# 
+# - *Causal interpretation rules for encoding and decoding models in neuroimaging*
+# 2015, Sebastian Weichwald, Timm Meyer, Ozan Özdenizci, Bernhard Schölkopf,
+# Tonio Ball c, Moritz Grosse-Wentrup a
+# 
+# A study explaining when and how we can use encoding and decoding models to make causal, as opposed to mere correlational interpretations. Under appreciated study. 
+# 
+# - *Natural speech reveals the semantic maps that tile human cerebral cortex*
+# 2016, Alexander G. Huth, Wendy A. de Heerb, Thomas L. Griffiths, Frédéric E. Theunissena,
+# and Jack L. Gallanta,
+# 
+# Here we focused on images, in this paper Huth et al use natural speech to investigate how semantics are organized in the brain. 
+# 
+# - *Quantitative models reveal the organization of diverse cognitive functions in the brain*
+# 2020, Tomoya Nakai & Shinji Nishimoto
+# 
+# This study uses encoding and decoding to investigate how mental tasks (counting, recall, imagery etc) are organized in the brain
+# 
+# - *Generic decoding of seen and imagined objects using hierarchical visual features*
+# 2017, Tomoyasu Horikawa & Yukiyasu Kamitani
+# 
+# A more recent decoding study using DNNs to decode visual imagery. Impressive results. 
+# 
+# 
 
 # In[ ]:
 
